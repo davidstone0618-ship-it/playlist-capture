@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111418">
+<meta name="robots" content="noindex">
+<title>Playlist Capture</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 20px 40px; background: #111418; color: #f2f4f7;
+         font-family: Roboto, system-ui, sans-serif; text-align: center; }
+  h1 { font-size: 18px; font-weight: 500; margin: 0 0 24px; color: #9aa4b2; }
+  #btn { width: 210px; height: 210px; border-radius: 50%; border: 0; background: #e5383b;
+         color: #fff; font-size: 26px; font-weight: 700; box-shadow: 0 8px 28px rgba(229,56,59,.4); }
+  #btn:disabled { background: #5a2b2c; box-shadow: none; }
+  #status { min-height: 28px; margin: 22px 0 8px; font-size: 18px; }
+  #card { display: none; margin: 14px auto 0; padding: 18px; max-width: 420px; background: #1c2128;
+          border-radius: 14px; text-align: left; }
+  #title { font-size: 21px; font-weight: 700; }
+  #artist { font-size: 17px; color: #c3cad5; margin-top: 2px; }
+  #meta { font-size: 14px; color: #9aa4b2; margin-top: 8px; }
+  #chips { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { padding: 10px 14px; border-radius: 20px; border: 1px solid #3a424d; background: none;
+          color: #f2f4f7; font-size: 15px; }
+  .chip.on { background: #2f81f7; border-color: #2f81f7; }
+  #open { display: inline-block; margin-top: 16px; color: #6cb0ff; font-size: 15px; }
+  #undo { display: block; margin-top: 16px; padding: 11px 14px; border-radius: 10px;
+          border: 1px solid #6b3133; background: none; color: #ff8a8c; font-size: 15px; }
+  #undo.arm { background: #e5383b; border-color: #e5383b; color: #fff; }
+  #linkbox { margin: 34px auto 0; max-width: 420px; display: flex; gap: 8px; }
+  #url { flex: 1; padding: 12px; border-radius: 10px; border: 1px solid #3a424d; background: #1c2128;
+         color: #f2f4f7; font-size: 15px; min-width: 0; }
+  #add { padding: 12px 16px; border-radius: 10px; border: 0; background: #3a424d; color: #fff; font-size: 15px; }
+  .hint { font-size: 13px; color: #7d8794; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>Playlist Capture</h1>
+  <button id="btn">Capture</button>
+  <div id="status">Tap while a song is playing</div>
+
+  <div id="card">
+    <div id="title"></div>
+    <div id="artist"></div>
+    <div id="meta"></div>
+    <div id="chips"></div>
+    <a id="open" target="_blank">Open in YouTube Music</a>
+    <button id="undo">Wrong song? Remove it</button>
+  </div>
+
+  <div id="linkbox">
+    <input id="url" enterkeyhint="search" placeholder="Say or type: song, artist">
+    <button id="add">Add</button>
+  </div>
+  <div class="hint">Tap the box, then the keyboard's microphone key to speak the song and artist.
+    A pasted YouTube Music link works here too.</div>
+
+<script>
+  var LISTEN_SECONDS = 10;
+  var btn = document.getElementById('btn');
+  var statusEl = document.getElementById('status');
+  var card = document.getElementById('card');
+  var current = null;
+
+  // ---- Connection settings ----
+  // The page holds no secrets. The script address (u) and passcode (k) arrive
+  // once in the setup link from the Sheet's "Phone Setup" tab and are kept in
+  // this browser only.
+  var cfg = null;
+  function readStore() {
+    try { return JSON.parse(localStorage.getItem('playlistCapture') || 'null'); } catch (e) { return null; }
+  }
+  function validCfg(c) {
+    return !!(c && c.k && typeof c.u === 'string' && c.u.indexOf('https://script.google.com/macros/') === 0);
+  }
+  (function loadCfg() {
+    var hash = location.hash.replace(/^#/, '');
+    if (hash) {
+      var p = new URLSearchParams(hash);
+      var fresh = { u: p.get('u') || '', k: p.get('k') || '' };
+      if (validCfg(fresh)) {
+        try { localStorage.setItem('playlistCapture', JSON.stringify(fresh)); } catch (e) {}
+        cfg = fresh;
+      }
+      try { history.replaceState(null, '', location.pathname); } catch (e) {}
+    }
+    if (!cfg) { var saved = readStore(); if (validCfg(saved)) cfg = saved; }
+  })();
+
+  function api(action, data) {
+    if (!cfg) return Promise.reject(new Error('Not connected. Open your phone link from the Sheet.'));
+    var body = { key: cfg.k, action: action };
+    for (var name in (data || {})) body[name] = data[name];
+    return fetch(cfg.u, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) throw new Error('The script did not answer (' + r.status + ').');
+      return r.json();
+    }).then(function (j) {
+      if (j && j.error) throw new Error(j.error);
+      return j;
+    });
+  }
+
+  function setStatus(t) { statusEl.textContent = t; }
+  function done(t) { btn.disabled = false; btn.textContent = 'Capture'; if (t) setStatus(t); }
+  function onError(e) { done('Error: ' + (e && e.message ? e.message : e)); }
+
+  btn.addEventListener('click', function () {
+    btn.disabled = true;
+    card.style.display = 'none';
+    setStatus('Starting microphone...');
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      return done('This browser cannot record audio. Open the page in Chrome.');
+    }
+    navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    }).then(record).catch(function (e) {
+      done('Microphone not available (' + (e && e.name ? e.name : 'error') +
+        '). Allow the mic for this page in Chrome, then try again.');
+    });
+  });
+
+  function record(stream) {
+    var types = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'];
+    var mime = '';
+    for (var i = 0; i < types.length; i++) {
+      if (MediaRecorder.isTypeSupported(types[i])) { mime = types[i]; break; }
+    }
+    var rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    var chunks = [];
+    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = function () {
+      stream.getTracks().forEach(function (t) { t.stop(); });
+      var blob = new Blob(chunks, { type: rec.mimeType || mime || 'audio/webm' });
+      var reader = new FileReader();
+      reader.onloadend = function () {
+        setStatus('Identifying...');
+        btn.textContent = '...';
+        api('audio', { audio: String(reader.result).split(',')[1], mimeType: blob.type })
+          .then(show).catch(onError);
+      };
+      reader.readAsDataURL(blob);
+    };
+    rec.start();
+    var left = LISTEN_SECONDS;
+    setStatus('Listening...');
+    btn.textContent = left;
+    var timer = setInterval(function () {
+      left--;
+      if (left > 0) { btn.textContent = left; return; }
+      clearInterval(timer);
+      rec.stop();
+    }, 1000);
+  }
+
+  function addText() {
+    var box = document.getElementById('url');
+    var text = box.value.trim();
+    if (!text || btn.disabled) return;
+    btn.disabled = true;
+    card.style.display = 'none';
+    box.blur();
+    setStatus('Searching...');
+    api('text', { text: text }).then(function (r) {
+      if (!r.notFound) box.value = '';
+      show(r);
+    }).catch(onError);
+  }
+  document.getElementById('add').addEventListener('click', addText);
+  document.getElementById('url').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') addText();
+  });
+
+  function show(r) {
+    if (r.notFound) return done(r.message || 'No match. Try again closer to the speaker.');
+    current = r;
+    resetUndo();
+    undoBtn.style.display = r.captureId ? 'block' : 'none';
+    document.getElementById('title').textContent = r.title || '(unknown title)';
+    document.getElementById('artist').textContent = r.artist || '';
+    document.getElementById('meta').textContent = 'Genre: ' + (r.genre || 'not set');
+    var open = document.getElementById('open');
+    open.style.display = r.link ? 'inline-block' : 'none';
+    if (r.link) open.href = r.link;
+
+    var chips = document.getElementById('chips');
+    chips.innerHTML = '';
+    (r.moods || []).forEach(function (m) {
+      var b = document.createElement('button');
+      b.className = 'chip' + (m === r.mood ? ' on' : '');
+      b.textContent = m;
+      b.addEventListener('click', function () { pickMood(m); });
+      chips.appendChild(b);
+    });
+    card.style.display = 'block';
+
+    if (r.duplicate) done('Already in your list.');
+    else if (r.note) done(r.note);
+    else done(r.mood ? 'Added. Tap a mood to change it.' : 'Added. Tap a mood.');
+  }
+
+  // Remove = full undo: out of the playlist and out of the Sheet.
+  // Two taps, so a bump in the truck does not delete anything.
+  var undoBtn = document.getElementById('undo');
+  var armTimer = null;
+  function resetUndo() {
+    clearTimeout(armTimer);
+    undoBtn.classList.remove('arm');
+    undoBtn.disabled = false;
+    undoBtn.textContent = 'Wrong song? Remove it';
+  }
+  undoBtn.addEventListener('click', function () {
+    if (!current || !current.captureId) return;
+    if (!undoBtn.classList.contains('arm')) {
+      undoBtn.classList.add('arm');
+      undoBtn.textContent = 'Tap again to remove';
+      armTimer = setTimeout(resetUndo, 4000);
+      return;
+    }
+    clearTimeout(armTimer);
+    undoBtn.disabled = true;
+    undoBtn.textContent = 'Removing...';
+    api('undo', { captureId: current.captureId }).then(function (r) {
+      current = null;
+      card.style.display = 'none';
+      resetUndo();
+      setStatus('Removed "' + r.title + '". Capture again or enter the song below.');
+    }).catch(function (e) { resetUndo(); onError(e); });
+  });
+
+  if (!cfg) {
+    btn.disabled = true;
+    setStatus('Not connected yet. Open your phone link from the "Phone Setup" tab of your Sheet.');
+  }
+
+  function pickMood(m) {
+    if (!current || !current.captureId) return;
+    var all = document.querySelectorAll('.chip');
+    for (var i = 0; i < all.length; i++) {
+      all[i].classList.toggle('on', all[i].textContent === m);
+    }
+    api('mood', { captureId: current.captureId, mood: m })
+      .then(function () { setStatus('Mood saved: ' + m); }).catch(onError);
+  }
+</script>
+</body>
+</html>
